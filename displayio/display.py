@@ -104,6 +104,8 @@ class Display:
         The initialization sequence should always leave the display memory access inline with
         the scan of the display to minimize tearing artifacts.
         """
+        print("Initializing display, color_depth", color_depth)
+        print("Initializing display, colstart", colstart, "rowstart", rowstart)
         self._bus = display_bus
         self._set_column_command = set_column_command
         self._set_row_command = set_row_command
@@ -120,10 +122,11 @@ class Display:
         self._brightness = 1.0
         self._auto_refresh = auto_refresh
         self._initialize(init_sequence)
-        self._buffer = Image.new("RGB", (width, height))
+        self._buffer = Image.new("RGB" if not grayscale else "L", (width, height))
         self._subrectangles = []
         self._bounds_encoding = ">BB" if single_byte_bounds else ">HH"
         self._current_group = None
+        self._color_depth = color_depth
         displays.append(self)
         self._refresh_thread = None
         if self._auto_refresh:
@@ -223,22 +226,36 @@ class Display:
     def _refresh_display_area(self, rectangle):
         """Loop through dirty rectangles and redraw that area."""
 
-        img = self._buffer.convert("RGB").crop(rectangle)
-        img = img.rotate(self._rotation, expand=True)
+        if self._color_depth == 16:
+            img = self._buffer.convert("RGB").crop(rectangle)
+            img = img.rotate(self._rotation, expand=True)
 
-        display_rectangle = self._apply_rotation(rectangle)
-        img = img.crop(self._clip(display_rectangle))
+            display_rectangle = self._apply_rotation(rectangle)
+            img = img.crop(self._clip(display_rectangle))
+            data = numpy.array(img).astype("uint16")
+            pixel_data = (
+                (data[:, :, 0] & 0xF0) | ((data[:, :, 1] & 0x0F)>>  4)
+            )
 
-        data = numpy.array(img).astype("uint16")
-        color = (
-            ((data[:, :, 0] & 0xF8) << 8)
-            | ((data[:, :, 1] & 0xFC) << 3)
-            | (data[:, :, 2] >> 3)
-        )
+            pixels = bytes(
+                numpy.dstack(color).flatten().tolist()
+            )
+        elif self._color_depth == 4:
+            img = self._buffer.convert("L").crop(rectangle)
+            img = img.rotate(self._rotation, expand=True)
 
-        pixels = bytes(
-            numpy.dstack(((color >> 8) & 0xFF, color & 0xFF)).flatten().tolist()
-        )
+            display_rectangle = self._apply_rotation(rectangle)
+            img = img.crop(self._clip(display_rectangle))
+            data = numpy.flipud(numpy.array(img).astype("uint8"))
+            pixel_data = (
+                (data[::2] & 0xF0)>>4 | ((data[1::2] & 0xF0)>>  0)
+            )
+
+            pixels = bytes(
+                numpy.dstack(pixel_data).flatten().tolist()
+            )
+        else:
+            raise ValueError("Unsupported color depth")
 
         self._write(
             self._set_column_command,
@@ -247,6 +264,7 @@ class Display:
                 display_rectangle.x2 + self._colstart - 1,
             ),
         )
+
         self._write(
             self._set_row_command,
             self._encode_pos(
